@@ -1,17 +1,53 @@
 from __future__ import annotations
 
-import audioop
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 import pyaudio
-from pydub import AudioSegment
+
+
+def _scale_pcm(chunk: bytes, sample_width: int, volume: float) -> bytes:
+    if volume >= 0.999:
+        return chunk
+    if volume <= 0.001:
+        return b"\x00" * len(chunk)
+    if sample_width not in (1, 2, 3, 4):
+        return chunk
+
+    out = bytearray(len(chunk))
+    step = sample_width
+
+    if sample_width == 1:
+        # 8-bit PCM is unsigned.
+        for i in range(0, len(chunk), step):
+            s = chunk[i] - 128
+            scaled = int(s * volume)
+            if scaled > 127:
+                scaled = 127
+            elif scaled < -128:
+                scaled = -128
+            out[i] = scaled + 128
+        return bytes(out)
+
+    min_v = -(1 << (8 * sample_width - 1))
+    max_v = (1 << (8 * sample_width - 1)) - 1
+    for i in range(0, len(chunk), step):
+        s = int.from_bytes(chunk[i : i + step], byteorder="little", signed=True)
+        scaled = int(s * volume)
+        if scaled > max_v:
+            scaled = max_v
+        elif scaled < min_v:
+            scaled = min_v
+        out[i : i + step] = scaled.to_bytes(step, byteorder="little", signed=True)
+    return bytes(out)
 
 
 class AudioPlayer:
-    """Threaded audio player that decodes with pydub and outputs via PyAudio."""
+    """Threaded audio player that decodes with ffmpeg and outputs via PyAudio."""
 
     def __init__(self, on_track_end: Optional[Callable[[], None]] = None) -> None:
         self._pa = pyaudio.PyAudio()
@@ -20,8 +56,8 @@ class AudioPlayer:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
-        self._segment: Optional[AudioSegment] = None
         self._track_path: Optional[Path] = None
+        self._raw_audio: bytes = b""
         self._frame_rate = 44100
         self._channels = 2
         self._sample_width = 2
@@ -63,15 +99,15 @@ class AudioPlayer:
 
     def load_and_play(self, path: Path, start_seconds: float = 0.0) -> None:
         self.stop()
-        self._segment = AudioSegment.from_file(path)
         self._track_path = path
+        self._raw_audio = self._decode_audio(path)
 
-        self._frame_rate = self._segment.frame_rate
-        self._channels = self._segment.channels
-        self._sample_width = self._segment.sample_width
+        self._frame_rate = 44100
+        self._channels = 2
+        self._sample_width = 2
 
         frame_size = self._sample_width * self._channels
-        self._frame_count = len(self._segment.raw_data) // frame_size
+        self._frame_count = len(self._raw_audio) // frame_size
 
         clamped_start = max(0.0, min(start_seconds, self.duration_seconds))
         self._position_frame = int(clamped_start * self._frame_rate)
@@ -115,6 +151,33 @@ class AudioPlayer:
         self.stop()
         self._pa.terminate()
 
+    def _decode_audio(self, path: Path) -> bytes:
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            raise RuntimeError("ffmpeg is not installed or not in PATH.")
+
+        cmd = [
+            ffmpeg_bin,
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"ffmpeg decode failed for '{path.name}': {detail}")
+        return proc.stdout
+
     def _close_stream(self) -> None:
         if self._stream is not None:
             try:
@@ -128,7 +191,7 @@ class AudioPlayer:
             self._stream = None
 
     def _playback_loop(self) -> None:
-        if self._segment is None:
+        if not self._raw_audio:
             return
 
         format_ = self._pa.get_format_from_width(self._sample_width)
@@ -141,7 +204,6 @@ class AudioPlayer:
 
         frame_size = self._sample_width * self._channels
         chunk_frames = 2048
-        raw = self._segment.raw_data
         reached_end = False
 
         while not self._stop_event.is_set():
@@ -159,13 +221,13 @@ class AudioPlayer:
             end_frame = min(start_frame + chunk_frames, self._frame_count)
             start_byte = start_frame * frame_size
             end_byte = end_frame * frame_size
-            chunk = raw[start_byte:end_byte]
+            chunk = self._raw_audio[start_byte:end_byte]
             if not chunk:
                 reached_end = True
                 break
 
             if self._volume < 0.999:
-                chunk = audioop.mul(chunk, self._sample_width, self._volume)
+                chunk = _scale_pcm(chunk, self._sample_width, self._volume)
 
             try:
                 self._stream.write(chunk)
