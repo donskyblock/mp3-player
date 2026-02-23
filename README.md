@@ -7,6 +7,7 @@ A desktop MP3 player with a Spotify-like UI built on PySide6, with PyAudio playb
 - Modern non-Tkinter desktop UI
 - Folder-based audio library loading
 - Search and double-click play
+- Deterministic seeded shuffle (reuse a seed to reproduce order)
 - Prev / Play-Pause / Next controls
 - Seek bar and live time updates
 - Volume slider and keyboard shortcuts
@@ -49,6 +50,13 @@ python main.py
 - `Ctrl+Left`: Previous track
 - `Ctrl+Up`: Volume up
 - `Ctrl+Down`: Volume down
+
+## Seeded Shuffle
+
+- Use the `Shuffle seed` field to control playlist shuffle order.
+- Enter any seed string and click `Shuffle` to get a repeatable order.
+- Leave it blank to generate a random seed automatically.
+- The active seed is shown in the field/status bar so you can save and reuse it later.
 
 ## Notes
 

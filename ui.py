@@ -117,6 +117,15 @@ class MainWindow(QMainWindow):
         self.load_btn.setObjectName("primaryBtn")
         left_layout.addWidget(self.load_btn)
 
+        seed_row = QHBoxLayout()
+        self.shuffle_seed_input = QLineEdit()
+        self.shuffle_seed_input.setPlaceholderText("Shuffle seed (blank = random)")
+        self.shuffle_btn = QPushButton("Shuffle")
+        self.shuffle_btn.setObjectName("ghostBtn")
+        seed_row.addWidget(self.shuffle_seed_input, stretch=1)
+        seed_row.addWidget(self.shuffle_btn)
+        left_layout.addLayout(seed_row)
+
         self.youtube_url = QLineEdit()
         self.youtube_url.setPlaceholderText("Paste YouTube playlist URL")
         left_layout.addWidget(self.youtube_url)
@@ -205,6 +214,8 @@ class MainWindow(QMainWindow):
 
     def _connect_events(self) -> None:
         self.load_btn.clicked.connect(self.load_folder)
+        self.shuffle_btn.clicked.connect(self.shuffle_playlist)
+        self.shuffle_seed_input.returnPressed.connect(self.shuffle_playlist)
         self.download_btn.clicked.connect(self.download_playlist)
         self.search_input.textChanged.connect(self._on_search)
         self.search_input.returnPressed.connect(self._play_first_search_result)
@@ -232,11 +243,31 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Choose audio folder")
         if not folder:
             return
-        self.playlist_manager.load_folder(Path(folder), shuffle=True)
+        seed = self.shuffle_seed_input.text().strip() or None
+        used_seed = self.playlist_manager.load_folder(Path(folder), shuffle=True, seed=seed)
+        if used_seed:
+            self.shuffle_seed_input.setText(used_seed)
         self._refresh_playlist_view()
-        self.status_bar.showMessage(f"Loaded {len(self.playlist_manager.playlist)} tracks")
+        self.status_bar.showMessage(
+            f"Loaded {len(self.playlist_manager.playlist)} tracks | shuffle seed: {used_seed}"
+        )
         if self.playlist_manager.playlist:
             self.play_track(0)
+
+    def shuffle_playlist(self) -> None:
+        if not self.playlist_manager.playlist:
+            self.status_bar.showMessage("Load a folder or playlist before shuffling")
+            return
+
+        seed = self.shuffle_seed_input.text().strip() or None
+        used_seed = self.playlist_manager.reshuffle(seed=seed)
+        if not used_seed:
+            return
+
+        self.shuffle_seed_input.setText(used_seed)
+        self._refresh_playlist_view()
+        self._highlight_current_song()
+        self.status_bar.showMessage(f"Shuffled with seed: {used_seed}")
 
     def _on_search(self, text: str) -> None:
         self.playlist_manager.apply_search(text)
@@ -305,6 +336,12 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Now playing: {song.name}")
 
         self._refresh_playlist_view()
+        self._highlight_current_song()
+
+    def _highlight_current_song(self) -> None:
+        if not self.playlist_manager.playlist:
+            return
+        song = self.playlist_manager.playlist[self.playlist_manager.index]
         for i in range(self.playlist_list.count()):
             item = self.playlist_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == str(song):
