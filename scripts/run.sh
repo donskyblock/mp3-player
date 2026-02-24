@@ -10,4 +10,6 @@ if [ -d .venv ]; then
   source .venv/bin/activate
 fi
 
+export JACK_NO_START_SERVER=1
+
 python main.py

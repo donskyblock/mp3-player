@@ -1,13 +1,74 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
 import pyaudio
+
+
+_ALSA_HANDLER_FUNC = ctypes.CFUNCTYPE(
+    None,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+)
+_ALSA_ERROR_HANDLER = None
+_ASOUND_LIB = None
+
+
+@contextmanager
+def _suppress_stderr() -> None:
+    try:
+        stderr_fd = sys.stderr.fileno()
+    except Exception:
+        yield
+        return
+
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_fd = os.dup(stderr_fd)
+    try:
+        os.dup2(devnull_fd, stderr_fd)
+        yield
+    finally:
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
+        os.close(devnull_fd)
+
+
+def _mute_alsa_warnings() -> None:
+    """Suppress libasound stderr noise when probing optional/nonexistent PCMs."""
+    global _ALSA_ERROR_HANDLER, _ASOUND_LIB
+    if _ALSA_ERROR_HANDLER is not None:
+        return
+
+    lib_path = ctypes.util.find_library("asound")
+    if not lib_path:
+        return
+    try:
+        _ASOUND_LIB = ctypes.cdll.LoadLibrary(lib_path)
+    except OSError:
+        return
+
+    def _ignore_errors(_filename, _line, _function, _err, _fmt) -> None:
+        return
+
+    _ALSA_ERROR_HANDLER = _ALSA_HANDLER_FUNC(_ignore_errors)
+    try:
+        _ASOUND_LIB.snd_lib_error_set_handler(_ALSA_ERROR_HANDLER)
+    except Exception:
+        _ALSA_ERROR_HANDLER = None
+        _ASOUND_LIB = None
 
 
 def _scale_pcm(chunk: bytes, sample_width: int, volume: float) -> bytes:
@@ -50,11 +111,14 @@ class AudioPlayer:
     """Threaded audio player that decodes with ffmpeg and outputs via PyAudio."""
 
     def __init__(self, on_track_end: Optional[Callable[[], None]] = None) -> None:
-        self._pa = pyaudio.PyAudio()
+        _mute_alsa_warnings()
+        with _suppress_stderr():
+            self._pa = pyaudio.PyAudio()
         self._stream = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._output_device_index = self._resolve_output_device_index()
 
         self._track_path: Optional[Path] = None
         self._raw_audio: bytes = b""
@@ -151,6 +215,30 @@ class AudioPlayer:
         self.stop()
         self._pa.terminate()
 
+    def _resolve_output_device_index(self) -> Optional[int]:
+        try:
+            info = self._pa.get_default_output_device_info()
+            index = info.get("index")
+            if isinstance(index, int):
+                return index
+        except Exception:
+            pass
+
+        try:
+            count = self._pa.get_device_count()
+        except Exception:
+            return None
+
+        for idx in range(count):
+            try:
+                info = self._pa.get_device_info_by_index(idx)
+            except Exception:
+                continue
+            channels = info.get("maxOutputChannels", 0)
+            if isinstance(channels, (int, float)) and channels > 0:
+                return idx
+        return None
+
     def _decode_audio(self, path: Path) -> bytes:
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
@@ -195,12 +283,20 @@ class AudioPlayer:
             return
 
         format_ = self._pa.get_format_from_width(self._sample_width)
-        self._stream = self._pa.open(
-            format=format_,
-            channels=self._channels,
-            rate=self._frame_rate,
-            output=True,
-        )
+        try:
+            open_kwargs = {
+                "format": format_,
+                "channels": self._channels,
+                "rate": self._frame_rate,
+                "output": True,
+            }
+            if self._output_device_index is not None:
+                open_kwargs["output_device_index"] = self._output_device_index
+            self._stream = self._pa.open(**open_kwargs)
+        except Exception:
+            self._playing = False
+            self._paused = False
+            return
 
         frame_size = self._sample_width * self._channels
         chunk_frames = 2048
