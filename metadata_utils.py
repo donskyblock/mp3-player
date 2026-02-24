@@ -90,6 +90,89 @@ def _first_tag(tags: dict[str, str], aliases: list[str]) -> str:
     return ""
 
 
+def _read_ytdlp_info_metadata(path: Path) -> dict[str, object]:
+    candidates: list[Path] = []
+    candidates.append(Path(str(path) + ".info.json"))
+    candidates.append(path.with_suffix(".info.json"))
+    candidates.extend(path.parent.glob(f"{path.stem}*.info.json"))
+
+    checked: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in checked:
+            continue
+        checked.add(key)
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _merge_ytdlp_metadata(base: AudioMetadata, ytdlp_data: dict[str, object]) -> AudioMetadata:
+    if not ytdlp_data:
+        return base
+
+    title = _clean_text(
+        str(
+            ytdlp_data.get("track")
+            or ytdlp_data.get("title")
+            or ""
+        )
+    ) or base.title
+
+    artist_candidates = [
+        ytdlp_data.get("artist"),
+        ytdlp_data.get("album_artist"),
+        ytdlp_data.get("uploader"),
+        ytdlp_data.get("channel"),
+        ytdlp_data.get("creator"),
+    ]
+    ytdlp_artist = ""
+    for candidate in artist_candidates:
+        clean = _clean_text(str(candidate or ""))
+        if clean:
+            ytdlp_artist = clean
+            break
+    artist = base.artist
+    if (not artist or artist == "Unknown Artist") and ytdlp_artist:
+        artist = ytdlp_artist
+
+    album = _clean_text(str(ytdlp_data.get("album") or ytdlp_data.get("playlist_title") or "")) or base.album
+    year = base.year or _parse_year(
+        str(ytdlp_data.get("release_date") or ytdlp_data.get("upload_date") or ytdlp_data.get("timestamp") or "")
+    )
+
+    genre = base.genre
+    categories = ytdlp_data.get("categories")
+    if not genre and isinstance(categories, list):
+        for entry in categories:
+            clean = _clean_text(str(entry))
+            if clean:
+                genre = clean
+                break
+    if not genre:
+        genre = _clean_text(str(ytdlp_data.get("genre") or ""))
+
+    duration_seconds = base.duration_seconds
+    if duration_seconds <= 0:
+        duration_seconds = _to_float(ytdlp_data.get("duration"))
+
+    return AudioMetadata(
+        title=title or base.title,
+        artist=artist or base.artist,
+        album=album or base.album,
+        year=year,
+        genre=genre,
+        duration_seconds=max(0.0, duration_seconds),
+        bitrate_kbps=base.bitrate_kbps,
+    )
+
+
 def read_audio_metadata(path: Path) -> AudioMetadata:
     filename_artist, filename_title = _parse_filename_title_artist(path)
     fallback = AudioMetadata(
@@ -101,10 +184,11 @@ def read_audio_metadata(path: Path) -> AudioMetadata:
         duration_seconds=0.0,
         bitrate_kbps=0,
     )
+    ytdlp_data = _read_ytdlp_info_metadata(path)
 
     ffprobe_bin = shutil.which("ffprobe")
     if not ffprobe_bin:
-        return fallback
+        return _merge_ytdlp_metadata(fallback, ytdlp_data)
 
     cmd = [
         ffprobe_bin,
@@ -119,15 +203,15 @@ def read_audio_metadata(path: Path) -> AudioMetadata:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7, check=False)
     except Exception:
-        return fallback
+        return _merge_ytdlp_metadata(fallback, ytdlp_data)
 
     if proc.returncode != 0 or not proc.stdout.strip():
-        return fallback
+        return _merge_ytdlp_metadata(fallback, ytdlp_data)
 
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return fallback
+        return _merge_ytdlp_metadata(fallback, ytdlp_data)
 
     format_data = data.get("format", {}) if isinstance(data, dict) else {}
     streams = data.get("streams", []) if isinstance(data, dict) else []
@@ -188,7 +272,7 @@ def read_audio_metadata(path: Path) -> AudioMetadata:
             artist = possible_artist
             title = possible_title
 
-    return AudioMetadata(
+    resolved = AudioMetadata(
         title=_clean_text(title) or fallback.title,
         artist=_clean_text(artist) or fallback.artist,
         album=_clean_text(album) or fallback.album,
@@ -197,6 +281,7 @@ def read_audio_metadata(path: Path) -> AudioMetadata:
         duration_seconds=max(0.0, duration_seconds),
         bitrate_kbps=bitrate_kbps,
     )
+    return _merge_ytdlp_metadata(resolved, ytdlp_data)
 
 
 def read_album_art_bytes(path: Path) -> bytes | None:

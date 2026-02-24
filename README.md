@@ -11,15 +11,18 @@ A pitch-black desktop audio player built with PySide6, with PyAudio playback, me
 - Embedded album-art thumbnails in queue rows, hero banner, now-playing panel, and saved playlist cards
 - Startup and import loading screens with logo, spinner, and live progress text
 - Background threaded imports (folder/ZIP/saved playlists) and async metadata/art hydration to keep UI responsive
+- Customizable keybinds in Settings, including optional global system-wide hotkeys
 - Deterministic seeded shuffle (reuse a seed to reproduce playlist order)
 - Folder loading with optional recursive scanning
 - ZIP archive import for music packs
 - Spotify playlist import (via Spotify Web API + YouTube audio matching)
 - Song finder modal (`Ctrl+K`) with search + multi-select download to build new queues
+- Song search and downloads are YouTube-first (Spotify credentials not required for song search)
 - Queue table sizing is locked to avoid window resizing jumps when song data changes
 - Save, select, load, and delete named playlists
 - Home page saved-playlists shelf with cards, plus a full library modal with all profiles
 - Track metadata panel (artist, album, year, genre, duration, bitrate)
+- Metadata fallback from yt-dlp `.info.json` sidecars when audio tags are missing
 - Configurable settings menu with persistent preferences
 - Debug menu with runtime snapshot panel and metadata cache refresh
 - Downloaded YouTube playlists routed to a configured directory
@@ -34,6 +37,7 @@ A pitch-black desktop audio player built with PySide6, with PyAudio playback, me
 - Python 3.10+
 - `ffmpeg` installed and available in `PATH` (required for YouTube audio extraction and some audio decoding)
 - Spotify API app credentials for Spotify playlist import (`Client ID` + `Client Secret`)
+- `pynput` for optional global (system-wide) hotkeys
 
 ## Install
 
@@ -59,6 +63,7 @@ python main.py
 
 ## Keyboard Shortcuts
 
+- Defaults:
 - `Space`: Play/Pause
 - `Ctrl+Right`: Next track
 - `Ctrl+Left`: Previous track
@@ -68,6 +73,7 @@ python main.py
 - `Ctrl+,`: Open settings
 - `Ctrl+Shift+D`: Open debug panel
 - `Ctrl+Q`: Quit app
+- These can be changed in `Settings` and optionally enabled as global (system-wide) hotkeys.
 
 ## Seeded Shuffle
 
@@ -110,4 +116,5 @@ python main.py
   - Linux: `~/.local/share/SabrinthPlayer/`
 - `settings.json`, `stats.json`, ZIP imports, and default downloads live inside that app directory.
 - YouTube downloads rely on `yt-dlp`, and metadata extraction uses `ffprobe` (typically shipped with `ffmpeg`).
+- Global hotkeys depend on OS support (`pynput` backend); some Wayland setups may restrict system-wide key capture.
 - Native executables are platform-specific. Build on each target OS for best results.

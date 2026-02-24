@@ -1,13 +1,16 @@
 import signal
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication
 
 from ui import LoadingDialog, MainWindow
 
 
 def main() -> int:
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     app.setApplicationName("Sabrinth Player")
     app.setOrganizationName("Sabrinth")

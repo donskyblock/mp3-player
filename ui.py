@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QStatusBar,
     QTreeWidget,
     QTreeWidgetItem,
@@ -47,7 +48,7 @@ from metadata_utils import AudioMetadata, read_album_art_bytes, read_audio_metad
 from player import AudioPlayer
 from playlist_manager import PlaylistManager, SUPPORTED_EXTENSIONS
 from spotify_importer import fetch_spotify_playlist_tracks
-from settings_manager import SettingsManager
+from settings_manager import DEFAULT_SETTINGS, SettingsManager
 from youtube_downloader import (
     YouTubeSearchResult,
     download_youtube_playlist,
@@ -61,6 +62,26 @@ LOGO_PATH = ASSET_DIR / "sabrinth_logo.svg"
 THEME_OPTIONS = {
     "Pitch Black": "pitch_black",
 }
+
+try:
+    from pynput import keyboard as pynput_keyboard
+except Exception:
+    pynput_keyboard = None
+
+
+KEYBIND_SETTING_KEYS: Dict[str, str] = {
+    "play_pause": "keybind_play_pause",
+    "next_track": "keybind_next",
+    "prev_track": "keybind_prev",
+    "volume_up": "keybind_volume_up",
+    "volume_down": "keybind_volume_down",
+    "open_settings": "keybind_open_settings",
+    "find_songs": "keybind_find_songs",
+    "open_debug": "keybind_open_debug",
+    "quit": "keybind_quit",
+}
+
+GLOBAL_HOTKEY_ACTIONS = ("play_pause", "next_track", "prev_track", "volume_up", "volume_down")
 
 
 class LoadingDialog(QDialog):
@@ -504,7 +525,7 @@ class SettingsDialog(QDialog):
         self._settings = settings
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Sabrinth Settings")
-        self.resize(620, 470)
+        self.resize(760, 820)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 14)
@@ -538,6 +559,12 @@ class SettingsDialog(QDialog):
         self.default_volume.setValue(settings.get_int("default_volume"))
         form.addRow("Default volume", self.default_volume)
 
+        self.ui_scale_percent = QSpinBox()
+        self.ui_scale_percent.setRange(80, 160)
+        self.ui_scale_percent.setSuffix("%")
+        self.ui_scale_percent.setValue(settings.get_int("ui_scale_percent"))
+        form.addRow("UI scale", self.ui_scale_percent)
+
         self.shuffle_on_load = QCheckBox("Shuffle when loading folders and imports")
         self.shuffle_on_load.setChecked(settings.get_bool("shuffle_on_load"))
         form.addRow("Shuffle on load", self.shuffle_on_load)
@@ -557,6 +584,10 @@ class SettingsDialog(QDialog):
         self.auto_adjust_enabled = QCheckBox("Enable dynamic volume mode by default")
         self.auto_adjust_enabled.setChecked(settings.get_bool("auto_adjust_enabled"))
         form.addRow("Dynamic volume", self.auto_adjust_enabled)
+
+        self.enable_global_hotkeys = QCheckBox("Enable global hotkeys when app is unfocused")
+        self.enable_global_hotkeys.setChecked(settings.get_bool("enable_global_hotkeys"))
+        form.addRow("Global hotkeys", self.enable_global_hotkeys)
 
         self.use_default_download_dir = QCheckBox("Always use configured download directory")
         self.use_default_download_dir.setChecked(settings.get_bool("use_default_download_dir"))
@@ -578,6 +609,41 @@ class SettingsDialog(QDialog):
         self.spotify_client_secret_input.setPlaceholderText("Spotify Client Secret")
         self.spotify_client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Spotify client secret", self.spotify_client_secret_input)
+
+        keybind_title = QLabel("Hotkeys")
+        keybind_title.setObjectName("dialogSubtitle")
+        keybind_hint = QLabel("Use Qt style bindings like Space, Ctrl+K, Ctrl+Shift+D.")
+        keybind_hint.setObjectName("metaHint")
+        keybind_hint.setWordWrap(True)
+        root.addWidget(keybind_title)
+        root.addWidget(keybind_hint)
+
+        keybind_form = QFormLayout()
+        keybind_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        keybind_form.setHorizontalSpacing(16)
+        keybind_form.setVerticalSpacing(8)
+        root.addLayout(keybind_form)
+
+        self.keybind_inputs: Dict[str, QLineEdit] = {}
+        labels = (
+            ("play_pause", "Play / Pause"),
+            ("next_track", "Next track"),
+            ("prev_track", "Previous track"),
+            ("volume_up", "Volume up"),
+            ("volume_down", "Volume down"),
+            ("find_songs", "Find songs"),
+            ("open_settings", "Open settings"),
+            ("open_debug", "Open debug"),
+            ("quit", "Quit app"),
+        )
+        for action, label in labels:
+            setting_key = KEYBIND_SETTING_KEYS[action]
+            default_value = str(DEFAULT_SETTINGS.get(setting_key, ""))
+            value = settings.get_str(setting_key).strip() or default_value
+            field = QLineEdit(value)
+            field.setPlaceholderText(default_value)
+            keybind_form.addRow(label, field)
+            self.keybind_inputs[action] = field
 
         self.use_default_download_dir.toggled.connect(self._on_download_mode_changed)
         self._on_download_mode_changed(self.use_default_download_dir.isChecked())
@@ -616,6 +682,12 @@ class SettingsDialog(QDialog):
                 color: #9aa6b3;
                 font-size: 13px;
                 margin-bottom: 6px;
+            }
+            QLabel#metaHint {
+                color: #9aa6b3;
+                font-size: 12px;
+                margin-top: -4px;
+                margin-bottom: 8px;
             }
             QLineEdit, QComboBox, QSpinBox {
                 background: #101217;
@@ -673,14 +745,16 @@ class SettingsDialog(QDialog):
 
     def values(self) -> Dict[str, object]:
         theme = self.theme_combo.currentData()
-        return {
+        values: Dict[str, object] = {
             "theme": str(theme),
             "default_volume": self.default_volume.value(),
+            "ui_scale_percent": self.ui_scale_percent.value(),
             "shuffle_on_load": self.shuffle_on_load.isChecked(),
             "autoplay_on_load": self.autoplay_on_load.isChecked(),
             "recursive_scan": self.recursive_scan.isChecked(),
             "show_track_stats": self.show_track_stats.isChecked(),
             "auto_adjust_enabled": self.auto_adjust_enabled.isChecked(),
+            "enable_global_hotkeys": self.enable_global_hotkeys.isChecked(),
             "use_default_download_dir": self.use_default_download_dir.isChecked(),
             "download_dir": self.download_dir_input.text().strip() or str(
                 self._settings.app_dir / "downloads"
@@ -688,6 +762,12 @@ class SettingsDialog(QDialog):
             "spotify_client_id": self.spotify_client_id_input.text().strip(),
             "spotify_client_secret": self.spotify_client_secret_input.text().strip(),
         }
+        for action, field in self.keybind_inputs.items():
+            setting_key = KEYBIND_SETTING_KEYS[action]
+            default_value = str(DEFAULT_SETTINGS.get(setting_key, ""))
+            value = " ".join(field.text().strip().split()) or default_value
+            values[setting_key] = value
+        return values
 
 
 class ImportDialog(QDialog):
@@ -988,7 +1068,7 @@ class SongSearchDialog(QDialog):
                 result = self._results[int(idx)]
             except (TypeError, ValueError, IndexError):
                 continue
-            queries.append(result.query_hint)
+            queries.append(result.webpage_url or result.query_hint)
         return queries
 
     def _accept_if_valid(self) -> None:
@@ -1279,13 +1359,17 @@ class DebugDialog(QDialog):
 
 class MainWindow(QMainWindow):
     track_finished_signal = Signal()
+    global_hotkey_signal = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.settings = SettingsManager()
 
         self.setWindowTitle("Sabrinth Player")
+        self.ui_scale_percent = max(80, min(160, self.settings.get_int("ui_scale_percent")))
+        self.ui_scale = self.ui_scale_percent / 100.0
         self.resize(1240, 760)
+        self.setMinimumSize(980, 620)
         if LOGO_PATH.exists():
             self.setWindowIcon(QIcon(str(LOGO_PATH)))
 
@@ -1302,6 +1386,10 @@ class MainWindow(QMainWindow):
         self.local_import_thread: LocalImportThread | None = None
         self.metadata_thread: PlaylistMetadataThread | None = None
         self._metadata_workers: List[PlaylistMetadataThread] = []
+        self._shortcuts: Dict[str, QShortcut] = {}
+        self._global_hotkey_listener = None
+        self._global_hotkey_active = False
+        self._global_hotkey_error: str | None = None
         self.loading_dialog: LoadingDialog | None = None
         self.theme_name = self.settings.get_str("theme")
         if self.theme_name not in THEME_OPTIONS.values():
@@ -1313,11 +1401,13 @@ class MainWindow(QMainWindow):
         self._metadata_cache: Dict[str, AudioMetadata] = {}
         self._art_cache: Dict[str, QPixmap | None] = {}
         self.active_collection_name = "Your Queue"
+        self._active_page = "home"
 
         self._build_ui()
         self._build_menu()
         self._setup_shortcuts()
         self._connect_events()
+        self.global_hotkey_signal.connect(self._on_global_hotkey_action)
 
         self.progress_timer = QTimer(self)
         self.progress_timer.setInterval(250)
@@ -1333,7 +1423,9 @@ class MainWindow(QMainWindow):
 
         self.volume_slider.setValue(self.settings.get_int("default_volume"))
         self._update_auto_button()
+        self._apply_ui_scale()
         self._apply_theme()
+        self._restart_global_hotkeys()
         self._refresh_download_hint()
         self._refresh_playlist_view()
         self._refresh_saved_playlist_combo()
@@ -1342,36 +1434,32 @@ class MainWindow(QMainWindow):
         app_menu = self.menuBar().addMenu("Sabrinth")
         debug_menu = self.menuBar().addMenu("Debug")
 
-        settings_action = QAction("Settings", self)
-        settings_action.setShortcut(QKeySequence("Ctrl+,"))
-        settings_action.triggered.connect(self.open_settings)
+        self.settings_action = QAction("Settings", self)
+        self.settings_action.triggered.connect(self.open_settings)
 
-        search_action = QAction("Find Songs", self)
-        search_action.setShortcut(QKeySequence("Ctrl+K"))
-        search_action.triggered.connect(self.open_song_search)
+        self.search_action = QAction("Find Songs", self)
+        self.search_action.triggered.connect(self.open_song_search)
 
         spotify_import_action = QAction("Import Spotify Playlist", self)
         spotify_import_action.triggered.connect(self._prompt_spotify_import)
 
-        quit_action = QAction("Quit", self)
-        quit_action.setShortcut(QKeySequence("Ctrl+Q"))
-        quit_action.triggered.connect(self.close)
+        self.quit_action = QAction("Quit", self)
+        self.quit_action.triggered.connect(self.close)
 
-        app_menu.addAction(search_action)
+        app_menu.addAction(self.search_action)
         app_menu.addAction(spotify_import_action)
         app_menu.addSeparator()
-        app_menu.addAction(settings_action)
+        app_menu.addAction(self.settings_action)
         app_menu.addSeparator()
-        app_menu.addAction(quit_action)
+        app_menu.addAction(self.quit_action)
 
-        debug_panel_action = QAction("Open Debug Panel", self)
-        debug_panel_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
-        debug_panel_action.triggered.connect(self.open_debug_panel)
+        self.debug_panel_action = QAction("Open Debug Panel", self)
+        self.debug_panel_action.triggered.connect(self.open_debug_panel)
 
         refresh_meta_action = QAction("Refresh Metadata Cache", self)
         refresh_meta_action.triggered.connect(self.refresh_metadata_cache)
 
-        debug_menu.addAction(debug_panel_action)
+        debug_menu.addAction(self.debug_panel_action)
         debug_menu.addAction(refresh_meta_action)
 
     def _build_ui(self) -> None:
@@ -1438,9 +1526,9 @@ class MainWindow(QMainWindow):
         self.find_songs_btn = QPushButton("Find Songs")
         self.find_songs_btn.setObjectName("ghostBtn")
         self.find_songs_btn.setToolTip("Search songs and add them to your queue")
-        self.library_btn = QPushButton("Library")
+        self.library_btn = QPushButton("Queue")
         self.library_btn.setObjectName("ghostBtn")
-        self.library_btn.setToolTip("Save, load, delete, or shuffle playlists")
+        self.library_btn.setToolTip("Open the full playlist queue screen")
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setObjectName("ghostBtn")
         self.settings_btn.setFixedWidth(46)
@@ -1487,6 +1575,14 @@ class MainWindow(QMainWindow):
         center_layout = QVBoxLayout(center_pane)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(10)
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("pageStack")
+        self._page_indices: Dict[str, int] = {}
+
+        home_page = QWidget()
+        home_layout = QVBoxLayout(home_page)
+        home_layout.setContentsMargins(0, 0, 0, 0)
+        home_layout.setSpacing(10)
 
         chip_row = QHBoxLayout()
         chip_row.setSpacing(8)
@@ -1497,7 +1593,7 @@ class MainWindow(QMainWindow):
             chip.setChecked(idx == 0)
             chip_row.addWidget(chip)
         chip_row.addStretch(1)
-        center_layout.addLayout(chip_row)
+        home_layout.addLayout(chip_row)
 
         hero_card = QFrame()
         hero_card.setObjectName("heroCard")
@@ -1522,60 +1618,14 @@ class MainWindow(QMainWindow):
         hero_text_col.addWidget(self.hero_subtitle)
         hero_text_col.addStretch(1)
 
-        hero_layout.addWidget(self.hero_art)
-        hero_layout.addLayout(hero_text_col, stretch=1)
-        center_layout.addWidget(hero_card)
-
-        playlist_panel = QFrame()
-        playlist_panel.setObjectName("playlistPanel")
-        playlist_layout = QVBoxLayout(playlist_panel)
-        playlist_layout.setContentsMargins(14, 14, 14, 14)
-        playlist_layout.setSpacing(8)
-        top_row = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(0)
-        playlist_label = QLabel("Queue / Library")
-        playlist_label.setObjectName("sectionTitle")
-        self.playlist_count_label = QLabel("0 tracks")
-        self.playlist_count_label.setObjectName("meta")
-        title_col.addWidget(playlist_label)
-        title_col.addWidget(self.playlist_count_label)
-        top_row.addLayout(title_col)
-        top_row.addStretch(1)
         self.hero_play_btn = QPushButton("▶ Play")
         self.hero_play_btn.setObjectName("heroPlayBtn")
         self.hero_play_btn.setToolTip("Play current queue")
-        top_row.addWidget(self.hero_play_btn)
-        playlist_layout.addLayout(top_row)
-        self.playlist_table = QTreeWidget()
-        self.playlist_table.setObjectName("playlistTable")
-        self.playlist_table.setColumnCount(6)
-        self.playlist_table.setHeaderLabels(["#", "Title", "Artist", "Album", "Added", "Time"])
-        self.playlist_table.setRootIsDecorated(False)
-        self.playlist_table.setUniformRowHeights(True)
-        self.playlist_table.setIconSize(QSize(40, 40))
-        self.playlist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.playlist_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.playlist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.playlist_table.setIndentation(0)
-        self.playlist_table.setAlternatingRowColors(False)
-        self.playlist_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
-        self.playlist_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.playlist_table.setTextElideMode(Qt.TextElideMode.ElideRight)
-        header = self.playlist_table.header()
-        header.setSectionsClickable(False)
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.playlist_table.setColumnWidth(0, 54)
-        self.playlist_table.setColumnWidth(4, 118)
-        self.playlist_table.setColumnWidth(5, 74)
-        playlist_layout.addWidget(self.playlist_table, stretch=1)
-        center_layout.addWidget(playlist_panel, stretch=1)
+        hero_text_col.addWidget(self.hero_play_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        hero_layout.addWidget(self.hero_art)
+        hero_layout.addLayout(hero_text_col, stretch=1)
+        home_layout.addWidget(hero_card)
 
         saved_panel = QFrame()
         saved_panel.setObjectName("savedPanel")
@@ -1609,12 +1659,77 @@ class MainWindow(QMainWindow):
         self.saved_home_list.setIconSize(QSize(46, 46))
         self.saved_home_list.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         saved_layout.addWidget(self.saved_home_list)
-        center_layout.addWidget(saved_panel)
+        home_layout.addWidget(saved_panel, stretch=1)
 
         self.download_dir_hint = QLabel("")
         self.download_dir_hint.setObjectName("meta")
         self.download_dir_hint.setWordWrap(True)
-        center_layout.addWidget(self.download_dir_hint)
+        home_layout.addWidget(self.download_dir_hint)
+
+        playlist_page = QWidget()
+        playlist_page_layout = QVBoxLayout(playlist_page)
+        playlist_page_layout.setContentsMargins(0, 0, 0, 0)
+        playlist_page_layout.setSpacing(10)
+
+        playlist_panel = QFrame()
+        playlist_panel.setObjectName("playlistPanel")
+        playlist_layout = QVBoxLayout(playlist_panel)
+        playlist_layout.setContentsMargins(14, 14, 14, 14)
+        playlist_layout.setSpacing(8)
+        top_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
+        playlist_label = QLabel("Playlist")
+        playlist_label.setObjectName("sectionTitle")
+        self.playlist_count_label = QLabel("0 tracks")
+        self.playlist_count_label.setObjectName("meta")
+        title_col.addWidget(playlist_label)
+        title_col.addWidget(self.playlist_count_label)
+        top_row.addLayout(title_col)
+        top_row.addStretch(1)
+        self.queue_shuffle_btn = QPushButton("Shuffle")
+        self.queue_shuffle_btn.setObjectName("ghostBtn")
+        self.queue_shuffle_btn.setToolTip("Live shuffle queue with a new seed")
+        top_row.addWidget(self.queue_shuffle_btn)
+        self.queue_home_btn = QPushButton("Home")
+        self.queue_home_btn.setObjectName("ghostBtn")
+        top_row.addWidget(self.queue_home_btn)
+        playlist_layout.addLayout(top_row)
+
+        self.playlist_table = QTreeWidget()
+        self.playlist_table.setObjectName("playlistTable")
+        self.playlist_table.setColumnCount(6)
+        self.playlist_table.setHeaderLabels(["#", "Title", "Artist", "Album", "Added", "Time"])
+        self.playlist_table.setRootIsDecorated(False)
+        self.playlist_table.setUniformRowHeights(True)
+        self.playlist_table.setIconSize(QSize(40, 40))
+        self.playlist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.playlist_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.playlist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.playlist_table.setIndentation(0)
+        self.playlist_table.setAlternatingRowColors(False)
+        self.playlist_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.playlist_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.playlist_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        header = self.playlist_table.header()
+        header.setSectionsClickable(False)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.playlist_table.setColumnWidth(0, 54)
+        self.playlist_table.setColumnWidth(4, 118)
+        self.playlist_table.setColumnWidth(5, 74)
+        playlist_layout.addWidget(self.playlist_table, stretch=1)
+        playlist_page_layout.addWidget(playlist_panel, stretch=1)
+
+        self._page_indices["home"] = self.page_stack.addWidget(home_page)
+        self._page_indices["playlist"] = self.page_stack.addWidget(playlist_page)
+        self.page_stack.setCurrentIndex(self._page_indices["home"])
+        center_layout.addWidget(self.page_stack, stretch=1)
         body_layout.addWidget(center_pane, stretch=4)
 
         right_panel = QFrame()
@@ -1720,26 +1835,197 @@ class MainWindow(QMainWindow):
         self.download_btn = QPushButton(self)
         self.download_btn.hide()
 
+    def _keybind_value(self, action: str) -> str:
+        setting_key = KEYBIND_SETTING_KEYS[action]
+        fallback = str(DEFAULT_SETTINGS.get(setting_key, ""))
+        value = self.settings.get_str(setting_key).strip()
+        return value or fallback
+
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Space"), self, activated=self._toggle_play)
-        QShortcut(QKeySequence("Ctrl+Right"), self, activated=self.play_next)
-        QShortcut(QKeySequence("Ctrl+Left"), self, activated=self.play_prev)
-        QShortcut(QKeySequence("Ctrl+Up"), self, activated=self._volume_up)
-        QShortcut(QKeySequence("Ctrl+Down"), self, activated=self._volume_down)
-        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
-        QShortcut(QKeySequence("Ctrl+K"), self, activated=self.open_song_search)
+        self._apply_shortcuts()
+
+    def _apply_shortcuts(self) -> None:
+        for shortcut in self._shortcuts.values():
+            shortcut.deleteLater()
+        self._shortcuts.clear()
+
+        action_handlers: Dict[str, Callable[[], None]] = {
+            "play_pause": self._toggle_play,
+            "next_track": self.play_next,
+            "prev_track": self.play_prev,
+            "volume_up": self._volume_up,
+            "volume_down": self._volume_down,
+            "open_settings": self.open_settings,
+            "find_songs": self.open_song_search,
+            "open_debug": self.open_debug_panel,
+            "quit": self.close,
+        }
+
+        for action, handler in action_handlers.items():
+            sequence = self._keybind_value(action)
+            if not sequence:
+                continue
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(handler)
+            self._shortcuts[action] = shortcut
+
+        self.search_action.setShortcut(QKeySequence(self._keybind_value("find_songs")))
+        self.settings_action.setShortcut(QKeySequence(self._keybind_value("open_settings")))
+        self.debug_panel_action.setShortcut(QKeySequence(self._keybind_value("open_debug")))
+        self.quit_action.setShortcut(QKeySequence(self._keybind_value("quit")))
+
+    @staticmethod
+    def _qt_to_pynput_hotkey(sequence: str) -> str | None:
+        text = " ".join(sequence.strip().split())
+        if not text:
+            return None
+
+        token_map = {
+            "ctrl": "<ctrl>",
+            "control": "<ctrl>",
+            "shift": "<shift>",
+            "alt": "<alt>",
+            "meta": "<cmd>",
+            "super": "<cmd>",
+            "win": "<cmd>",
+            "left": "<left>",
+            "right": "<right>",
+            "up": "<up>",
+            "down": "<down>",
+            "space": "<space>",
+            "enter": "<enter>",
+            "return": "<enter>",
+            "esc": "<esc>",
+            "escape": "<esc>",
+            "tab": "<tab>",
+            "backspace": "<backspace>",
+            "delete": "<delete>",
+        }
+
+        parts = [part.strip() for part in text.split("+") if part.strip()]
+        if not parts:
+            return None
+
+        converted: List[str] = []
+        for part in parts:
+            lowered = part.lower()
+            if lowered in token_map:
+                converted.append(token_map[lowered])
+                continue
+            if len(part) == 1:
+                converted.append(part.lower())
+                continue
+            converted.append(part.lower())
+        return "+".join(converted)
+
+    def _restart_global_hotkeys(self) -> None:
+        self._stop_global_hotkeys()
+        if not self.settings.get_bool("enable_global_hotkeys"):
+            self._global_hotkey_error = None
+            return
+        if pynput_keyboard is None:
+            self._global_hotkey_error = "pynput is not installed"
+            self.status_bar.showMessage("Global hotkeys unavailable: install pynput")
+            return
+
+        bindings: Dict[str, Callable[[], None]] = {}
+        for action in GLOBAL_HOTKEY_ACTIONS:
+            seq = self._keybind_value(action)
+            combo = self._qt_to_pynput_hotkey(seq)
+            if not combo:
+                continue
+            bindings[combo] = lambda act=action: self.global_hotkey_signal.emit(act)
+
+        if not bindings:
+            self._global_hotkey_error = "No valid global hotkey bindings configured"
+            return
+
+        try:
+            self._global_hotkey_listener = pynput_keyboard.GlobalHotKeys(bindings)
+            self._global_hotkey_listener.start()
+            self._global_hotkey_active = True
+            self._global_hotkey_error = None
+        except Exception as err:
+            self._global_hotkey_listener = None
+            self._global_hotkey_active = False
+            self._global_hotkey_error = str(err)
+            self.status_bar.showMessage(f"Global hotkeys failed: {err}")
+
+    def _stop_global_hotkeys(self) -> None:
+        listener = self._global_hotkey_listener
+        self._global_hotkey_listener = None
+        self._global_hotkey_active = False
+        if listener is None:
+            return
+        try:
+            listener.stop()
+        except Exception:
+            pass
+
+    def _on_global_hotkey_action(self, action: str) -> None:
+        if self.isActiveWindow():
+            return
+        if action == "play_pause":
+            self._toggle_play()
+        elif action == "next_track":
+            self.play_next()
+        elif action == "prev_track":
+            self.play_prev()
+        elif action == "volume_up":
+            self._volume_up()
+        elif action == "volume_down":
+            self._volume_down()
+
+    def _scale_px(self, value: int) -> int:
+        return max(1, int(round(value * self.ui_scale)))
+
+    def _apply_ui_scale(self) -> None:
+        self.ui_scale_percent = max(80, min(160, self.settings.get_int("ui_scale_percent")))
+        self.ui_scale = self.ui_scale_percent / 100.0
+        app_font = QApplication.font()
+        app_font.setPointSize(max(9, int(round(10 * self.ui_scale))))
+        QApplication.setFont(app_font)
+
+        self.setMinimumSize(self._scale_px(980), self._scale_px(620))
+        self.logo_label.setFixedSize(self._scale_px(42), self._scale_px(42))
+        if LOGO_PATH.exists():
+            pix = QPixmap(str(LOGO_PATH))
+            if not pix.isNull():
+                self.logo_label.setPixmap(
+                    pix.scaled(
+                        self._scale_px(42),
+                        self._scale_px(42),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+        self.hero_art.setFixedSize(self._scale_px(118), self._scale_px(118))
+        self.playlist_table.setIconSize(QSize(self._scale_px(40), self._scale_px(40)))
+        self.playlist_table.setColumnWidth(0, self._scale_px(54))
+        self.playlist_table.setColumnWidth(4, self._scale_px(118))
+        self.playlist_table.setColumnWidth(5, self._scale_px(74))
+        self.saved_home_list.setGridSize(QSize(self._scale_px(188), self._scale_px(88)))
+        self.saved_home_list.setIconSize(QSize(self._scale_px(46), self._scale_px(46)))
+        self.artwork_label.setFixedSize(self._scale_px(272), self._scale_px(272))
+        self.volume_slider.setFixedWidth(self._scale_px(180))
+        self.settings_btn.setFixedWidth(self._scale_px(46))
 
     def _connect_events(self) -> None:
         self.settings_btn.clicked.connect(self.open_settings)
         self.import_btn.clicked.connect(self.open_import_modal)
         self.find_songs_btn.clicked.connect(self.open_song_search)
-        self.library_btn.clicked.connect(self.open_library_modal)
+        self.library_btn.clicked.connect(self._show_playlist_page)
         self.hero_play_btn.clicked.connect(self._on_hero_play)
         self.search_input.textChanged.connect(self._on_search)
         self.search_input.returnPressed.connect(self._play_first_search_result)
         self.playlist_table.itemDoubleClicked.connect(self._play_selected_item)
         self.saved_home_list.itemDoubleClicked.connect(self._open_saved_from_home)
-        self.saved_view_all_btn.clicked.connect(self.open_library_modal)
+        self.saved_view_all_btn.clicked.connect(self._open_library_actions)
+        self.queue_shuffle_btn.clicked.connect(self._live_shuffle_playlist)
+        self.queue_home_btn.clicked.connect(self._show_home_page)
+        self.rail_home_btn.clicked.connect(self._show_home_page)
+        self.rail_library_btn.clicked.connect(self._show_playlist_page)
+        self.rail_saved_btn.clicked.connect(self._open_library_actions)
 
         self.play_btn.clicked.connect(self._toggle_play)
         self.next_btn.clicked.connect(self.play_next)
@@ -1778,6 +2064,31 @@ class MainWindow(QMainWindow):
             return str(song.resolve())
         except Exception:
             return str(song)
+
+    def _show_page(self, page: str) -> None:
+        index = self._page_indices.get(page)
+        if index is None:
+            return
+        self.page_stack.setCurrentIndex(index)
+        self._active_page = page
+        self._sync_nav_for_page()
+
+    def _sync_nav_for_page(self) -> None:
+        if self._active_page == "playlist":
+            self.rail_library_btn.setChecked(True)
+            return
+        self.rail_home_btn.setChecked(True)
+
+    def _show_home_page(self) -> None:
+        self._show_page("home")
+
+    def _show_playlist_page(self) -> None:
+        self._show_page("playlist")
+
+    def _open_library_actions(self) -> None:
+        self.rail_saved_btn.setChecked(True)
+        self.open_library_modal()
+        self._sync_nav_for_page()
 
     def _quick_metadata(self, song: Path) -> AudioMetadata:
         stem = song.stem.replace("_", " ").strip()
@@ -1856,6 +2167,7 @@ class MainWindow(QMainWindow):
         self._metadata_cache.clear()
         self._art_cache.clear()
         self._refresh_playlist_view()
+        self._show_playlist_page()
 
         if mode == "zip":
             target_dir = str(payload.get("target_dir", "-"))
@@ -1962,7 +2274,10 @@ class MainWindow(QMainWindow):
         if item is not None:
             song = Path(song_key)
             self._apply_metadata_to_item(item, song, metadata)
-            item.setIcon(1, QIcon(self._art_pixmap_for_song(song, size=40, allow_blocking=False)))
+            item.setIcon(
+                1,
+                QIcon(self._art_pixmap_for_song(song, size=self._scale_px(40), allow_blocking=False)),
+            )
 
         if not self.playlist_manager.playlist:
             return
@@ -1975,7 +2290,7 @@ class MainWindow(QMainWindow):
                 self.now_playing.setText(metadata.display_title())
                 self.meta_label.setText(self._metadata_text(metadata, current_song))
                 self.artwork_label.setPixmap(
-                    self._art_pixmap_for_song(current_song, size=272, allow_blocking=False)
+                    self._art_pixmap_for_song(current_song, size=self._scale_px(272), allow_blocking=False)
                 )
                 self._refresh_hero_banner()
                 return
@@ -2000,9 +2315,9 @@ class MainWindow(QMainWindow):
         spotify_ready = bool(
             self.settings.get_str("spotify_client_id") and self.settings.get_str("spotify_client_secret")
         )
-        spotify_text = "Spotify import ready" if spotify_ready else "Spotify credentials missing"
+        spotify_text = "Spotify import ready" if spotify_ready else "Spotify import optional (credentials missing)"
         self.download_dir_hint.setText(
-            f"Download dir: {self.settings.download_dir()} ({mode})  ·  {spotify_text}"
+            f"Download dir: {self.settings.download_dir()} ({mode})  ·  Song search uses YouTube  ·  {spotify_text}"
         )
 
     def _refresh_saved_playlist_combo(self, select_name: str | None = None) -> None:
@@ -2055,9 +2370,9 @@ class MainWindow(QMainWindow):
                 if probe.exists():
                     cover_song = probe
             icon_pixmap = (
-                self._art_pixmap_for_song(cover_song, size=46, allow_blocking=False)
+                self._art_pixmap_for_song(cover_song, size=self._scale_px(46), allow_blocking=False)
                 if cover_song
-                else self._placeholder_art_pixmap(name, size=46)
+                else self._placeholder_art_pixmap(name, size=self._scale_px(46))
             )
             item.setIcon(QIcon(icon_pixmap))
             self.saved_home_list.addItem(item)
@@ -2172,7 +2487,7 @@ class MainWindow(QMainWindow):
             item.setData(0, Qt.ItemDataRole.UserRole, str(song))
             metadata = self._metadata_for(song, allow_blocking=False)
             self._apply_metadata_to_item(item, song, metadata)
-            art = self._art_pixmap_for_song(song, size=40, allow_blocking=False)
+            art = self._art_pixmap_for_song(song, size=self._scale_px(40), allow_blocking=False)
             item.setIcon(1, QIcon(art))
             self.playlist_table.addTopLevelItem(item)
             key = self._song_key(song)
@@ -2187,7 +2502,7 @@ class MainWindow(QMainWindow):
         else:
             self.playlist_count_label.setText(f"{total} tracks")
         if total == 0:
-            self.artwork_label.setPixmap(self._placeholder_art_pixmap("S", size=272))
+            self.artwork_label.setPixmap(self._placeholder_art_pixmap("S", size=self._scale_px(272)))
 
         self._refresh_hero_banner()
         self._highlight_current_song()
@@ -2240,7 +2555,7 @@ class MainWindow(QMainWindow):
             self.hero_context.setText("Playlist")
             self.hero_title.setText("Your Queue")
             self.hero_subtitle.setText("Import or search songs to start")
-            self.hero_art.setPixmap(self._placeholder_art_pixmap("S", size=118))
+            self.hero_art.setPixmap(self._placeholder_art_pixmap("S", size=self._scale_px(118)))
             return
 
         title = self.active_collection_name.strip() or "Your Queue"
@@ -2259,7 +2574,9 @@ class MainWindow(QMainWindow):
             artist = metadata.artist if metadata.artist else "Unknown Artist"
             self.hero_subtitle.setText(f"{artist}  ·  {total} songs in queue")
             hero_song = now_song
-        self.hero_art.setPixmap(self._art_pixmap_for_song(hero_song, size=118, allow_blocking=False))
+        self.hero_art.setPixmap(
+            self._art_pixmap_for_song(hero_song, size=self._scale_px(118), allow_blocking=False)
+        )
 
     def _on_hero_play(self) -> None:
         if not self.playlist_manager.playlist:
@@ -2447,6 +2764,7 @@ class MainWindow(QMainWindow):
         self._metadata_cache.clear()
         self._art_cache.clear()
         self._refresh_playlist_view()
+        self._show_playlist_page()
         self.status_bar.showMessage(f"Added {len(songs)} songs from search")
 
         if save_name:
@@ -2522,6 +2840,7 @@ class MainWindow(QMainWindow):
         self._metadata_cache.clear()
         self._art_cache.clear()
         self._refresh_playlist_view()
+        self._show_playlist_page()
         self.status_bar.showMessage(f"Imported Spotify playlist '{playlist_name}' with {len(songs)} tracks")
 
         if songs and self.settings.get_bool("autoplay_on_load"):
@@ -2591,9 +2910,15 @@ class MainWindow(QMainWindow):
         self._refresh_playlist_view()
         self.status_bar.showMessage(f"Shuffled with seed: {used_seed}")
 
+    def _live_shuffle_playlist(self) -> None:
+        self.shuffle_seed_input.clear()
+        self.shuffle_playlist(seed=None)
+
     def _on_search(self, text: str) -> None:
         self.playlist_manager.apply_search(text)
         self._refresh_playlist_view()
+        if text.strip():
+            self._show_playlist_page()
 
     def _play_first_search_result(self) -> None:
         if not self.playlist_manager.filtered_playlist:
@@ -2614,6 +2939,7 @@ class MainWindow(QMainWindow):
             idx = self.playlist_manager.playlist.index(song)
         except ValueError:
             return
+        self._show_playlist_page()
         self.play_track(idx)
 
     def _toggle_play(self) -> None:
@@ -2655,7 +2981,9 @@ class MainWindow(QMainWindow):
         self.now_playing.setText(metadata.display_title())
         self.meta_label.setText(self._metadata_text(metadata, song))
         self.path_label.setText(str(song.parent))
-        self.artwork_label.setPixmap(self._art_pixmap_for_song(song, size=272, allow_blocking=False))
+        self.artwork_label.setPixmap(
+            self._art_pixmap_for_song(song, size=self._scale_px(272), allow_blocking=False)
+        )
 
         display_duration = metadata.duration_seconds if metadata.duration_seconds > 0 else self.track_duration
         self.time_total.setText(self._fmt_seconds(display_duration))
@@ -2752,6 +3080,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
+        old_scale = self.settings.get_int("ui_scale_percent")
         values = dialog.values()
         self.settings.update(values)
 
@@ -2764,10 +3093,16 @@ class MainWindow(QMainWindow):
         if self.auto_adjust_enabled:
             self.next_adjust_at = time.time() + random.randint(6 * 60, 24 * 60)
 
+        self._apply_shortcuts()
+        self._restart_global_hotkeys()
         self.volume_slider.setValue(self.settings.get_int("default_volume"))
+        self._apply_ui_scale()
         self._apply_theme()
         self._refresh_download_hint()
         self._refresh_playlist_view()
+        if old_scale != self.settings.get_int("ui_scale_percent"):
+            self.status_bar.showMessage("Settings saved (UI scale updated)")
+            return
         self.status_bar.showMessage("Settings saved")
 
     def refresh_metadata_cache(self) -> None:
@@ -2800,6 +3135,7 @@ class MainWindow(QMainWindow):
             "[App]",
             f"Window title: {self.windowTitle()}",
             f"Theme: {self.theme_name}",
+            f"UI scale: {self.ui_scale_percent}%",
             f"App dir: {self.settings.app_dir}",
             f"Settings path: {self.settings.path}",
             "",
@@ -2830,6 +3166,9 @@ class MainWindow(QMainWindow):
             f"Search download active: {bool(self.query_download_thread and self.query_download_thread.isRunning())}",
             f"Spotify import active: {bool(self.spotify_thread and self.spotify_thread.isRunning())}",
             f"Local import active: {bool(self.local_import_thread and self.local_import_thread.isRunning())}",
+            f"Global hotkeys enabled: {self.settings.get_bool('enable_global_hotkeys')}",
+            f"Global hotkeys active: {self._global_hotkey_active}",
+            f"Global hotkeys error: {self._global_hotkey_error or '-'}",
             "",
             "[Metadata]",
             f"Metadata worker active: {bool(self.metadata_thread and self.metadata_thread.isRunning())}",
@@ -2891,6 +3230,7 @@ class MainWindow(QMainWindow):
         self._metadata_cache.clear()
         self._art_cache.clear()
         self._refresh_playlist_view()
+        self._show_playlist_page()
         self.status_bar.showMessage(f"Playlist ready with {len(songs)} tracks")
         if songs and self.settings.get_bool("autoplay_on_load"):
             self.play_track(0)
@@ -3192,6 +3532,7 @@ class MainWindow(QMainWindow):
         self.player.shutdown()
         if self.loading_dialog and self.loading_dialog.isVisible():
             self.loading_dialog.hide()
+        self._stop_global_hotkeys()
         if self.local_import_thread and self.local_import_thread.isRunning():
             self.local_import_thread.requestInterruption()
             self.local_import_thread.quit()

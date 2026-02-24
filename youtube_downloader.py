@@ -95,6 +95,18 @@ def search_youtube_songs(query: str, limit: int = 10) -> List[YouTubeSearchResul
     return out
 
 
+def _is_url(value: str) -> bool:
+    low = value.strip().lower()
+    return low.startswith("http://") or low.startswith("https://")
+
+
+def _query_target(value: str) -> str:
+    clean = value.strip()
+    if _is_url(clean):
+        return clean
+    return f"ytsearch1:{clean}"
+
+
 def download_youtube_queries(
     queries: List[str],
     output_dir: Path,
@@ -139,6 +151,8 @@ def _download_with_library(url: str, output_dir: Path, emit: Callable[[str], Non
         "outtmpl": outtmpl,
         "noplaylist": False,
         "ignoreerrors": True,
+        "addmetadata": True,
+        "writeinfojson": True,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -184,6 +198,8 @@ def _download_queries_with_library(
         "outtmpl": outtmpl,
         "noplaylist": True,
         "ignoreerrors": True,
+        "addmetadata": True,
+        "writeinfojson": True,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -200,7 +216,7 @@ def _download_queries_with_library(
     with yt_dlp.YoutubeDL(opts) as ydl:
         for idx, query in enumerate(queries, start=1):
             emit(f"[{idx}/{len(queries)}] Downloading: {query}")
-            ydl.extract_info(f"ytsearch1:{query}", download=True)
+            ydl.extract_info(_query_target(query), download=True)
 
     files = sorted({p.resolve() for p in output_dir.glob("*.mp3")} - before, key=lambda p: p.name.lower())
     if not files:
@@ -221,6 +237,8 @@ def _download_with_cli(url: str, output_dir: Path, emit: Callable[[str], None]) 
         "mp3",
         "--audio-quality",
         "192K",
+        "--add-metadata",
+        "--write-info-json",
         "--yes-playlist",
         "-o",
         str(output_dir / "%(playlist_index)s - %(title)s.%(ext)s"),
@@ -250,10 +268,12 @@ def _download_queries_with_cli(
             "mp3",
             "--audio-quality",
             "192K",
+            "--add-metadata",
+            "--write-info-json",
             "--no-playlist",
             "-o",
             str(output_dir / f"{idx:03d} - %(title)s.%(ext)s"),
-            f"ytsearch1:{query}",
+            _query_target(query),
         ]
         subprocess.run(cmd, check=True)
 
